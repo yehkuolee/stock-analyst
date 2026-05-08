@@ -31,63 +31,90 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 }
 
-# ── 1. K 線資料（TWSE STOCK_DAY） ────────────────────────
+# ── 1. K 線資料（TWSE 上市 + TPEx 上櫃自動偵測） ──────────
 
-def fetch_kline(stock_code: str) -> tuple[pd.DataFrame, str]:
-    """抓最近 60 個交易日 K 線，回傳 (DataFrame, 股票名稱)"""
-    rows = []
-    stock_name = stock_code
-
-    # 抓最近 4 個月（確保涵蓋 60 個交易日）
+def _months_list(n=4) -> list:
     today = date.today()
     months = []
     d = today.replace(day=1)
-    for _ in range(4):
+    for _ in range(n):
         months.append(d)
-        if d.month == 1:
-            d = d.replace(year=d.year - 1, month=12)
-        else:
-            d = d.replace(month=d.month - 1)
+        d = d.replace(month=d.month - 1) if d.month > 1 else d.replace(year=d.year - 1, month=12)
+    return months
 
+def _roc_to_date(s: str) -> date:
+    p = s.replace(".", "/").split("/")
+    return date(int(p[0]) + 1911, int(p[1]), int(p[2]))
+
+def _fetch_twse(stock_code: str, months: list) -> tuple[list, str]:
+    rows, stock_name = [], stock_code
     for m in months:
-        date_str = m.strftime("%Y%m01")
         url = (
             f"https://www.twse.com.tw/exchangeReport/STOCK_DAY"
-            f"?response=json&date={date_str}&stockNo={stock_code}"
+            f"?response=json&date={m.strftime('%Y%m01')}&stockNo={stock_code}"
         )
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
-            data = resp.json()
+            data = requests.get(url, headers=HEADERS, timeout=10, verify=False).json()
             if data.get("stat") != "OK" or not data.get("data"):
-                time.sleep(0.3)
-                continue
-            # 從 title 解析股票名稱（格式：「113年03月 2330 台積電 各日成交資訊」）
-            if len(rows) == 0:
+                time.sleep(0.3); continue
+            if not rows:
                 parts = data.get("title", "").split()
                 if len(parts) >= 3:
                     stock_name = parts[2]
             rows.extend(data["data"])
-        except Exception as e:
-            print(f"  警告：{m.strftime('%Y-%m')} K 線抓取失敗（{e}）")
+        except Exception:
+            pass
         time.sleep(0.3)
+    return rows, stock_name
+
+def _fetch_tpex(stock_code: str, months: list) -> tuple[list, str]:
+    rows, stock_name = [], stock_code
+    for m in months:
+        roc_date = f"{m.year - 1911}/{m.month:02d}"
+        url = (
+            f"https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_info/"
+            f"st43_result.php?l=zh-tw&d={roc_date}&stkNo={stock_code}&s=0,asc,0"
+        )
+        try:
+            data = requests.get(url, headers=HEADERS, timeout=10, verify=False).json()
+            aa = data.get("aaData", [])
+            if not aa:
+                time.sleep(0.3); continue
+            if not rows and data.get("stkName"):
+                stock_name = data["stkName"]
+            rows.extend(aa)
+        except Exception:
+            pass
+        time.sleep(0.3)
+    return rows, stock_name
+
+def fetch_kline(stock_code: str) -> tuple[pd.DataFrame, str]:
+    """抓最近 60 個交易日 K 線，自動判斷上市／上櫃"""
+    months = _months_list(4)
+
+    rows, stock_name = _fetch_twse(stock_code, months)
+    market = "twse"
+    if not rows:
+        rows, stock_name = _fetch_tpex(stock_code, months)
+        market = "tpex"
 
     if not rows:
         raise ValueError(f"無法取得 {stock_code} 的 K 線資料，請確認股票代號是否正確。")
 
-    df = pd.DataFrame(
-        rows,
-        columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數", "註記"],
-    )
+    if market == "twse":
+        df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數", "註記"])
+        for col in ["開盤價", "最高價", "最低價", "收盤價"]:
+            df[col] = df[col].str.replace(",", "").astype(float)
+        df["成交股數"] = df["成交股數"].str.replace(",", "").astype(float) / 1000
+        df["date"] = df["日期"].apply(_roc_to_date)
+    else:
+        # TPEx: 日期/成交股數/成交金額/開盤/最高/最低/收盤/漲跌/筆數
+        df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"])
+        for col in ["開盤價", "最高價", "最低價", "收盤價"]:
+            df[col] = df[col].str.replace(",", "").astype(float)
+        df["成交股數"] = df["成交股數"].str.replace(",", "").astype(float) / 1000
+        df["date"] = df["日期"].apply(_roc_to_date)
 
-    for col in ["開盤價", "最高價", "最低價", "收盤價"]:
-        df[col] = df[col].str.replace(",", "").astype(float)
-    df["成交股數"] = df["成交股數"].str.replace(",", "").astype(float) / 1000  # 轉成張
-
-    def roc_to_date(s):
-        p = s.split("/")
-        return date(int(p[0]) + 1911, int(p[1]), int(p[2]))
-
-    df["date"] = df["日期"].apply(roc_to_date)
     df = df.sort_values("date").tail(60).reset_index(drop=True)
     return df, stock_name
 
