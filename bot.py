@@ -162,16 +162,11 @@ def build_embed(data: dict) -> discord.Embed:
     return embed
 
 
-# ── 指令：!analyze ────────────────────────────────────────
+# ── 分析核心（共用） ──────────────────────────────────────
 
-@bot.command(name="analyze", aliases=["a", "分析"])
-async def analyze(ctx, stock_code: str = None):
-    if not stock_code:
-        await ctx.reply("請輸入股票代號，例如：`!analyze 2330`")
-        return
-
+async def do_analyze(message, stock_code: str):
     stock_code = stock_code.strip().upper()
-    waiting = await ctx.reply(f"🔍 **{stock_code}** 分析中，約需 60 秒，請稍候...")
+    waiting = await message.reply(f"🔍 **{stock_code}** 分析中，約需 60 秒，請稍候...")
 
     loop = asyncio.get_event_loop()
     try:
@@ -182,11 +177,37 @@ async def analyze(ctx, stock_code: str = None):
         embed = build_embed(data)
         await waiting.edit(content="", embed=embed)
     except asyncio.TimeoutError:
-        await waiting.edit(content=f"❌ 分析逾時（超過 5 分鐘），請稍後再試")
+        await waiting.edit(content="❌ 分析逾時（超過 5 分鐘），請稍後再試")
     except ValueError as e:
         await waiting.edit(content=f"❌ {e}")
     except Exception as e:
         await waiting.edit(content=f"❌ 分析失敗：{e}")
+
+
+# ── 監聽所有訊息：直接打股票代號即可 ──────────────────────
+
+import re
+STOCK_CODE_RE = re.compile(r"^\d{4,6}$")
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    content = message.content.strip()
+    if STOCK_CODE_RE.match(content):
+        await do_analyze(message, content)
+        return
+    await bot.process_commands(message)
+
+
+# ── 指令：!analyze（保留相容） ────────────────────────────
+
+@bot.command(name="analyze", aliases=["a", "分析"])
+async def analyze(ctx, stock_code: str = None):
+    if not stock_code:
+        await ctx.reply("請直接輸入股票代號，例如：`2330`")
+        return
+    await do_analyze(ctx.message, stock_code)
 
 
 @bot.command(name="help_analyze", aliases=["ah"])
