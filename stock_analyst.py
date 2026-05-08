@@ -24,7 +24,6 @@ if _env_file.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 import requests
-import anthropic
 import pandas as pd
 import numpy as np
 
