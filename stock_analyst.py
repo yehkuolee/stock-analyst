@@ -107,10 +107,10 @@ def fetch_institutional(stock_code: str, dates: list) -> pd.DataFrame:
             f"?date={date_str}&selectType=ALLBUT0999&response=json"
         )
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=10, verify=False)
+            resp = requests.get(url, headers=HEADERS, timeout=8, verify=False)
             data = resp.json()
             if data.get("stat") != "OK" or not data.get("data"):
-                time.sleep(0.4)
+                time.sleep(0.2)
                 continue
             for row in data["data"]:
                 if str(row[0]).strip() == stock_code:
@@ -129,7 +129,7 @@ def fetch_institutional(stock_code: str, dates: list) -> pd.DataFrame:
                     break
         except Exception:
             pass
-        time.sleep(0.4)
+        time.sleep(0.2)
 
     print()
     if not records:

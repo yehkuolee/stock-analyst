@@ -175,9 +175,14 @@ async def analyze(ctx, stock_code: str = None):
 
     loop = asyncio.get_event_loop()
     try:
-        data = await loop.run_in_executor(executor, lambda: run_analysis(stock_code))
+        data = await asyncio.wait_for(
+            loop.run_in_executor(executor, lambda: run_analysis(stock_code)),
+            timeout=300,
+        )
         embed = build_embed(data)
         await waiting.edit(content="", embed=embed)
+    except asyncio.TimeoutError:
+        await waiting.edit(content=f"❌ 分析逾時（超過 5 分鐘），請稍後再試")
     except ValueError as e:
         await waiting.edit(content=f"❌ {e}")
     except Exception as e:
