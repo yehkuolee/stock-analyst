@@ -330,7 +330,6 @@ DIF：{last['DIF']}  MACD：{last['MACD']}  OSC：{last['OSC']}
         max_tokens=1024,
     )
 
-    text = result.stdout.strip()
     text = resp.choices[0].message.content.strip()
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
