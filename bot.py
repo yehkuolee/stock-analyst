@@ -124,10 +124,26 @@ def build_embed(data: dict) -> discord.Embed:
         inline=False,
     )
 
-    # 操作建議
+    # 操作建議（結構化進場/停損/目標）
+    entry      = analysis.get("entry")
+    stop_loss  = analysis.get("stop_loss")
+    target     = analysis.get("target")
+    if entry and stop_loss and target:
+        try:
+            risk_range   = float(entry) - float(stop_loss)
+            reward_range = float(target) - float(entry)
+            ratio = round(reward_range / risk_range, 1) if risk_range > 0 else "—"
+            suggestion_val = (
+                f"進場 **${entry}** ｜ 停損 **${stop_loss}** ｜ 目標 **${target}**　"
+                f"風報 1:{ratio}"
+            )
+        except Exception:
+            suggestion_val = "—"
+    else:
+        suggestion_val = "—"
     embed.add_field(
         name="📌 操作建議",
-        value=analysis.get("suggestion", "—"),
+        value=suggestion_val,
         inline=False,
     )
 

@@ -344,7 +344,9 @@ DIF：{last['DIF']}  MACD：{last['MACD']}  OSC：{last['OSC']}
   "stance": "多方 / 空方 / 觀望",
   "short_term": "3-5 個交易日短線預測（1-2 句）",
   "key_levels": {{"support": [數字, 數字], "resistance": [數字, 數字]}},
-  "suggestion": "具體操作建議（1-3 句）",
+  "entry": 進場價格（數字，單位元，依技術支撐/型態評估）,
+  "stop_loss": 停損價格（數字，單位元，跌破即離場）,
+  "target": 目標價格（數字，單位元，依壓力位評估）,
   "risk": "風險提醒（1-2 句）",
   "summary": "給散戶的白話整體分析（3-5 句）"
 }}"""
@@ -567,7 +569,7 @@ def generate_html(stock_code, stock_name, df, inst_df, alerts, analysis, news) -
   <div class="section">
     <h2>AI 綜合研判</h2>
     <div class="summary-box">{analysis.get('summary', '')}</div>
-    <div class="suggestion-box">📌 <strong>操作建議：</strong>{analysis.get('suggestion', '')}</div>
+    <div class="suggestion-box">📌 <strong>操作建議：</strong>進場 ${analysis.get('entry','—')} ｜ 停損 ${analysis.get('stop_loss','—')} ｜ 目標 ${analysis.get('target','—')}</div>
     <div class="risk-box">⚠️ <strong>風險提醒：</strong>{analysis.get('risk', '')}</div>
     <div class="level-grid">
       <div class="level-card">
