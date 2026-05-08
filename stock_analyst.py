@@ -88,8 +88,76 @@ def _fetch_tpex(stock_code: str, months: list) -> tuple[list, str]:
         time.sleep(0.3)
     return rows, stock_name
 
+
+def _fetch_tpex_name(stock_code: str) -> str:
+    """從 TPEx codeQuery 取中文股票名稱"""
+    try:
+        r = requests.get(
+            "https://www.tpex.org.tw/www/zh-tw/api/codeQuery",
+            params={"query": stock_code},
+            headers=HEADERS, timeout=5, verify=False
+        )
+        for s in r.json().get("suggestions", []):
+            data_list = s.get("data", [])
+            if data_list:
+                name_part = data_list[0].split("\t")[0]  # "1815 富喬"
+                parts = name_part.split(" ", 1)
+                if len(parts) > 1:
+                    return parts[1].strip()
+    except Exception:
+        pass
+    return stock_code
+
+
+def _fetch_yahoo_tpex(stock_code: str) -> tuple[pd.DataFrame, str]:
+    """用 Yahoo Finance (.TWO) 取上櫃股 K 線，作為 TPEx API 失效時的備援"""
+    from datetime import timezone, timedelta as td
+    TW = timezone(td(hours=8))
+
+    stock_name = _fetch_tpex_name(stock_code)
+    try:
+        r = requests.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_code}.TWO",
+            params={"interval": "1d", "range": "4mo"},
+            headers=HEADERS, timeout=10
+        )
+        result = r.json().get("chart", {}).get("result", [])
+        if not result:
+            return pd.DataFrame(), stock_code
+        result = result[0]
+        timestamps = result.get("timestamp", [])
+        quote = result.get("indicators", {}).get("quote", [{}])[0]
+        if not timestamps:
+            return pd.DataFrame(), stock_name
+
+        records = []
+        for i, ts in enumerate(timestamps):
+            c = quote.get("close", [])[i] if i < len(quote.get("close", [])) else None
+            if c is None:
+                continue
+            o = (quote.get("open", [])[i] if i < len(quote.get("open", [])) else None) or c
+            h = (quote.get("high", [])[i] if i < len(quote.get("high", [])) else None) or c
+            l = (quote.get("low",  [])[i] if i < len(quote.get("low",  [])) else None) or c
+            v = (quote.get("volume", [])[i] if i < len(quote.get("volume", [])) else 0) or 0
+            dt = datetime.fromtimestamp(ts, tz=TW)
+            records.append({
+                "date": dt.date(),
+                "日期": dt.strftime("%Y/%m/%d"),
+                "開盤價": round(o, 2), "最高價": round(h, 2),
+                "最低價": round(l, 2), "收盤價": round(c, 2),
+                "成交股數": v / 1000,
+                "成交金額": 0, "漲跌價差": 0, "成交筆數": 0,
+            })
+        if not records:
+            return pd.DataFrame(), stock_name
+        df = pd.DataFrame(records).sort_values("date").tail(60).reset_index(drop=True)
+        return df, stock_name
+    except Exception:
+        return pd.DataFrame(), stock_code
+
+
 def fetch_kline(stock_code: str) -> tuple[pd.DataFrame, str]:
-    """抓最近 60 個交易日 K 線，自動判斷上市／上櫃"""
+    """抓最近 60 個交易日 K 線，自動判斷上市／上櫃，TPEx 失效時備援 Yahoo Finance"""
     months = _months_list(4)
 
     rows, stock_name = _fetch_twse(stock_code, months)
@@ -98,25 +166,24 @@ def fetch_kline(stock_code: str) -> tuple[pd.DataFrame, str]:
         rows, stock_name = _fetch_tpex(stock_code, months)
         market = "tpex"
 
-    if not rows:
-        raise ValueError(f"無法取得 {stock_code} 的 K 線資料，請確認股票代號是否正確。")
-
-    if market == "twse":
-        df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數", "註記"])
+    if rows:
+        if market == "twse":
+            df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數", "註記"])
+        else:
+            df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"])
         for col in ["開盤價", "最高價", "最低價", "收盤價"]:
             df[col] = df[col].str.replace(",", "").astype(float)
         df["成交股數"] = df["成交股數"].str.replace(",", "").astype(float) / 1000
         df["date"] = df["日期"].apply(_roc_to_date)
-    else:
-        # TPEx: 日期/成交股數/成交金額/開盤/最高/最低/收盤/漲跌/筆數
-        df = pd.DataFrame(rows, columns=["日期", "成交股數", "成交金額", "開盤價", "最高價", "最低價", "收盤價", "漲跌價差", "成交筆數"])
-        for col in ["開盤價", "最高價", "最低價", "收盤價"]:
-            df[col] = df[col].str.replace(",", "").astype(float)
-        df["成交股數"] = df["成交股數"].str.replace(",", "").astype(float) / 1000
-        df["date"] = df["日期"].apply(_roc_to_date)
+        df = df.sort_values("date").tail(60).reset_index(drop=True)
+        return df, stock_name
 
-    df = df.sort_values("date").tail(60).reset_index(drop=True)
-    return df, stock_name
+    # TPEx API 失效，備援 Yahoo Finance .TWO
+    df, stock_name = _fetch_yahoo_tpex(stock_code)
+    if not df.empty:
+        return df, stock_name
+
+    raise ValueError(f"無法取得 {stock_code} 的 K 線資料，請確認股票代號是否正確。")
 
 
 # ── 2. 三大法人（TWSE T86，共 60 個交易日） ────────────────
