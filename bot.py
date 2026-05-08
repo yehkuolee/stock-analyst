@@ -130,8 +130,9 @@ def build_embed(data: dict) -> discord.Embed:
     target     = analysis.get("target")
     if entry and stop_loss and target:
         try:
-            risk_range   = float(entry) - float(stop_loss)
-            reward_range = float(target) - float(entry)
+            e, s, t = float(entry), float(stop_loss), float(target)
+            risk_range   = abs(e - s)
+            reward_range = abs(t - e)
             ratio = round(reward_range / risk_range, 1) if risk_range > 0 else "—"
             suggestion_val = (
                 f"進場 **${entry}** ｜ 停損 **${stop_loss}** ｜ 目標 **${target}**　"

@@ -332,7 +332,7 @@ def fetch_news(stock_code: str, stock_name: str) -> list:
     api_key = os.environ.get("FIRECRAWL_API_KEY", "")
     if not api_key:
         return []
-    query = f"{stock_code} {stock_name} 股票 最新消息"
+    query = f"台灣 {stock_code} {stock_name} 股票 最新消息"
     try:
         resp = requests.post(
             "https://api.firecrawl.dev/v1/search",
@@ -411,9 +411,9 @@ DIF：{last['DIF']}  MACD：{last['MACD']}  OSC：{last['OSC']}
   "stance": "多方 / 空方 / 觀望",
   "short_term": "3-5 個交易日短線預測（1-2 句）",
   "key_levels": {{"support": [數字, 數字], "resistance": [數字, 數字]}},
-  "entry": 進場價格（數字，單位元，依技術支撐/型態評估）,
-  "stop_loss": 停損價格（數字，單位元，跌破即離場）,
-  "target": 目標價格（數字，單位元，依壓力位評估）,
+  "entry": 做多進場價格（數字，單位元，依支撐/型態評估，必須低於 target）,
+  "stop_loss": 停損價格（數字，單位元，必須低於 entry，跌破即停損）,
+  "target": 目標價格（數字，單位元，依壓力位評估，必須高於 entry）,
   "risk": "風險提醒（1-2 句）",
   "summary": "給散戶的白話整體分析（3-5 句）"
 }}"""
