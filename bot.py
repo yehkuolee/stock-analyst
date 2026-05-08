@@ -131,13 +131,14 @@ def build_embed(data: dict) -> discord.Embed:
     if entry and stop_loss and target:
         try:
             e, s, t = float(entry), float(stop_loss), float(target)
-            risk_range   = abs(e - s)
-            reward_range = abs(t - e)
-            ratio = round(reward_range / risk_range, 1) if risk_range > 0 else "—"
-            suggestion_val = (
-                f"進場 **${entry}** ｜ 停損 **${stop_loss}** ｜ 目標 **${target}**　"
-                f"風報 1:{ratio}"
-            )
+            if s < e < t:  # 合法做多：停損 < 進場 < 目標
+                ratio = round((t - e) / (e - s), 1)
+                suggestion_val = (
+                    f"進場 **${entry}** ｜ 停損 **${stop_loss}** ｜ 目標 **${target}**　"
+                    f"風報 1:{ratio}"
+                )
+            else:
+                suggestion_val = "—"
         except Exception:
             suggestion_val = "—"
     else:
