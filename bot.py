@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""
+股票分析 Discord Bot
+觸發：!analyze 2330
+"""
+
+import asyncio
+import os
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import discord
+from discord.ext import commands
+
+# 載入 .env（同目錄）
+_env = Path(__file__).parent / ".env"
+if _env.exists():
+    for _line in _env.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
+
+# 把同目錄加入 import path，才能 import stock_analyst
+sys.path.insert(0, str(Path(__file__).parent))
+from stock_analyst import (
+    fetch_kline, fetch_institutional, fetch_news,
+    calc_indicators, generate_alerts, ai_analysis,
+)
+
+# ── Discord Bot 設定 ─────────────────────────────────────
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+executor = ThreadPoolExecutor(max_workers=2)
+
+STANCE_COLOR = {"多方": 0x26a69a, "空方": 0xef5350, "觀望": 0xffd700}
+STANCE_ICON  = {"多方": "🟢", "空方": "🔴", "觀望": "🟡"}
+
+
+# ── 分析主流程（在 thread 執行，避免阻塞 event loop） ────────
+
+def run_analysis(stock_code: str) -> dict:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    df, stock_name = fetch_kline(stock_code)
+    df = calc_indicators(df)
+    inst_df = fetch_institutional(stock_code, list(df["date"]))
+    news = fetch_news(stock_code, stock_name)
+    alerts = generate_alerts(df)
+    analysis = ai_analysis(stock_code, stock_name, df, inst_df, alerts, news)
+
+    last = df.iloc[-1]
+    return {
+        "stock_code": stock_code,
+        "stock_name": stock_name,
+        "last": last,
+        "inst_df": inst_df,
+        "alerts": alerts,
+        "analysis": analysis,
+        "news": news,
+    }
+
+
+# ── 組 Discord Embed ──────────────────────────────────────
+
+def build_embed(data: dict) -> discord.Embed:
+    analysis = data["analysis"]
+    last = data["last"]
+    alerts = data["alerts"]
+    news = data["news"]
+    code = data["stock_code"]
+    name = data["stock_name"]
+
+    stance = analysis.get("stance", "觀望")
+    icon = STANCE_ICON.get(stance, "🟡")
+    color = STANCE_COLOR.get(stance, 0xffd700)
+
+    embed = discord.Embed(
+        title=f"📊 {code} {name}　{icon} {stance}",
+        description=analysis.get("summary", ""),
+        color=color,
+    )
+
+    # 收盤 + 均線
+    embed.add_field(
+        name="📈 收盤資訊",
+        value=(
+            f"收盤 **{last['收盤價']}**　"
+            f"MA5 `{last['MA5']}`　"
+            f"MA10 `{last['MA10']}`　"
+            f"MA20 `{last['MA20']}`"
+        ),
+        inline=False,
+    )
+
+    # 技術指標
+    embed.add_field(
+        name="🔢 技術指標",
+        value=(
+            f"RSI `{last['RSI']}`　"
+            f"K `{last['K']}`　D `{last['D']}`　"
+            f"DIF `{last['DIF']}`　OSC `{last['OSC']}`"
+        ),
+        inline=False,
+    )
+
+    # 支撐壓力
+    kl = analysis.get("key_levels", {})
+    support_str = " / ".join(str(s) for s in kl.get("support", [])) or "—"
+    resist_str  = " / ".join(str(r) for r in kl.get("resistance", [])) or "—"
+    embed.add_field(
+        name="🗺️ 支撐 ／ 壓力",
+        value=f"🔵 支撐：**{support_str}**　🔴 壓力：**{resist_str}**",
+        inline=False,
+    )
+
+    # 短線預測
+    embed.add_field(
+        name="🔮 短線預測（3-5 日）",
+        value=analysis.get("short_term", "—"),
+        inline=False,
+    )
+
+    # 操作建議
+    embed.add_field(
+        name="📌 操作建議",
+        value=analysis.get("suggestion", "—"),
+        inline=False,
+    )
+
+    # 風險提醒
+    embed.add_field(
+        name="⚠️ 風險提醒",
+        value=analysis.get("risk", "—"),
+        inline=False,
+    )
+
+    # 技術警示
+    if alerts:
+        priority_icon = {1: "🔴", 2: "🟡", 3: "🔵"}
+        alert_lines = [f"{priority_icon.get(a['priority'], '▪')} **{a['type']}**：{a['msg']}" for a in alerts[:5]]
+        embed.add_field(
+            name="🚨 技術警示",
+            value="\n".join(alert_lines),
+            inline=False,
+        )
+
+    # 近期新聞
+    if news:
+        news_lines = [f"• [{n['title']}]({n['url']})" for n in news[:3] if n.get("title")]
+        if news_lines:
+            embed.add_field(
+                name="📰 近期新聞",
+                value="\n".join(news_lines),
+                inline=False,
+            )
+
+    embed.set_footer(text=f"資料截至 {last['date']}　法人資料 60 日　by stock-analyst bot")
+    return embed
+
+
+# ── 指令：!analyze ────────────────────────────────────────
+
+@bot.command(name="analyze", aliases=["a", "分析"])
+async def analyze(ctx, stock_code: str = None):
+    if not stock_code:
+        await ctx.reply("請輸入股票代號，例如：`!analyze 2330`")
+        return
+
+    stock_code = stock_code.strip().upper()
+    waiting = await ctx.reply(f"🔍 **{stock_code}** 分析中，約需 60 秒，請稍候...")
+
+    loop = asyncio.get_event_loop()
+    try:
+        data = await loop.run_in_executor(executor, lambda: run_analysis(stock_code))
+        embed = build_embed(data)
+        await waiting.edit(content="", embed=embed)
+    except ValueError as e:
+        await waiting.edit(content=f"❌ {e}")
+    except Exception as e:
+        await waiting.edit(content=f"❌ 分析失敗：{e}")
+
+
+@bot.command(name="help_analyze", aliases=["ah"])
+async def help_analyze(ctx):
+    embed = discord.Embed(
+        title="📖 股票分析 Bot 使用說明",
+        color=0x90caf9,
+    )
+    embed.add_field(name="分析指令", value="`!analyze {代號}`\n例：`!analyze 2330`", inline=False)
+    embed.add_field(name="縮寫", value="`!a 2330`　或　`!分析 2330`", inline=False)
+    embed.add_field(name="分析內容", value="K 線 60 日、三大法人 60 日、Firecrawl 新聞、Claude AI 綜合研判", inline=False)
+    await ctx.reply(embed=embed)
+
+
+# ── 啟動 ─────────────────────────────────────────────────
+
+@bot.event
+async def on_ready():
+    print(f"✅ Bot 上線：{bot.user}（{bot.user.id}）")
+    print("   指令：!analyze {股票代號}")
+
+
+def main():
+    token = os.environ.get("DISCORD_BOT_TOKEN", "")
+    if not token:
+        print("❌ 請在 .env 填入 DISCORD_BOT_TOKEN")
+        sys.exit(1)
+    bot.run(token)
+
+
+if __name__ == "__main__":
+    main()
