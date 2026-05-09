@@ -41,8 +41,10 @@ executor = ThreadPoolExecutor(max_workers=2)
 STANCE_COLOR = {"多方": 0x26a69a, "空方": 0xef5350, "觀望": 0xffd700}
 STANCE_ICON  = {"多方": "🟢", "空方": "🔴", "觀望": "🟡"}
 
-# 每個頻道最後一次股票分析的文字摘要，供新對話時作為背景
+# 每個頻道最後一次股票分析的文字摘要（給 Groq 閱讀用）
 channel_context: dict[int, str] = {}
+# 每個頻道最後一次股票分析的結構化數字（權威數據，禁止 Groq 自行替換）
+channel_data: dict[int, dict] = {}
 
 STOCK_CODE_RE = re.compile(r"^\d{4,6}$")
 
@@ -182,9 +184,34 @@ async def do_analyze(message, stock_code: str):
         embed = build_embed(data)
         await waiting.edit(content="", embed=embed)
 
-        # 儲存分析摘要供後續追問使用
+        # 儲存分析結果供後續追問使用
         analysis = data["analysis"]
         last = data["last"]
+        kl = analysis.get("key_levels", {})
+
+        channel_data[message.channel.id] = {
+            "code": data["stock_code"],
+            "name": data["stock_name"],
+            "close": last["收盤價"],
+            "ma5": last["MA5"],
+            "ma10": last["MA10"],
+            "ma20": last["MA20"],
+            "rsi": last["RSI"],
+            "k": last["K"],
+            "d": last["D"],
+            "dif": last["DIF"],
+            "osc": last["OSC"],
+            "support": kl.get("support", []),
+            "resistance": kl.get("resistance", []),
+            "entry": analysis.get("entry", "—"),
+            "stop_loss": analysis.get("stop_loss", "—"),
+            "target": analysis.get("target", "—"),
+            "stance": analysis.get("stance", "觀望"),
+            "summary": analysis.get("summary", ""),
+            "short_term": analysis.get("short_term", ""),
+            "risk": analysis.get("risk", ""),
+        }
+
         channel_context[message.channel.id] = (
             f"股票：{data['stock_code']} {data['stock_name']}\n"
             f"收盤：{last['收盤價']}　MA5：{last['MA5']}　MA20：{last['MA20']}\n"
@@ -260,12 +287,33 @@ def web_search(query: str, limit: int = 5) -> list[dict]:
 
 # ── 對話問答（@mention 或回覆串） ────────────────────────
 
+def build_data_block(cd: dict) -> str:
+    """把 channel_data 組成給 Groq 的鎖定數字區塊。"""
+    support_str = " / ".join(str(s) for s in cd["support"]) or "—"
+    resist_str  = " / ".join(str(r) for r in cd["resistance"]) or "—"
+    return (
+        f"=== 真實技術數據（權威，禁止更動或替換） ===\n"
+        f"股票：{cd['code']} {cd['name']}\n"
+        f"收盤價：{cd['close']}（唯一正確現價）\n"
+        f"MA5：{cd['ma5']}　MA10：{cd['ma10']}　MA20：{cd['ma20']}\n"
+        f"RSI：{cd['rsi']}　K：{cd['k']}　D：{cd['d']}\n"
+        f"DIF：{cd['dif']}　OSC：{cd['osc']}\n"
+        f"支撐：{support_str}\n"
+        f"壓力：{resist_str}\n"
+        f"建議進場：{cd['entry']}　停損：{cd['stop_loss']}　目標：{cd['target']}\n"
+        f"研判立場：{cd['stance']}\n"
+        f"AI 摘要：{cd['summary']}\n"
+        f"短線預測：{cd['short_term']}\n"
+        f"風險提醒：{cd['risk']}\n"
+        f"=== 以上數字為唯一依據，不可自行推算或替換 ==="
+    )
+
+
 async def do_chat(message: discord.Message, question: str, history: list[dict] = None):
-    ctx_text = channel_context.get(message.channel.id, "")
+    cd = channel_data.get(message.channel.id)
 
     thinking_msg = await message.reply("🔍 搜尋資料中...")
 
-    # 先上網搜尋，再組 Groq prompt
     loop = asyncio.get_event_loop()
     search_results = await loop.run_in_executor(executor, lambda: web_search(question))
 
@@ -276,13 +324,15 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
         "用繁體中文回答，語氣像老手交流，簡潔有力。\n\n"
         "回答規則：\n"
         "1. 直接給結論和具體操作，禁止說「你可以考慮」「視情況而定」「根據個人風險」等模糊廢話。\n"
-        "2. 操作建議必須帶具體數字：哪個價位加碼、哪個價位停損、哪個價位減碼，數字從【頻道最近分析的股票】的收盤價、支撐、壓力、進場、停損、目標欄位取用。\n"
-        "3. 股價以【頻道最近分析的股票】收盤價為準，禁止用搜尋結果的股價。\n"
-        "4. 結合 RSI、KD、MA 等技術指標說明現在是強勢/弱勢/整理，讓建議有依據。\n"
-        "5. 財報、基本面等非價格數據可從【網路搜尋結果】取用，不可捏造。\n"
-        "6. 不要列出網站或來源連結，來源自動附在後面。\n"
-        "7. 若真的缺乏足夠資訊，明確說缺哪個數據，不要用空話填充。\n"
+        "2. 所有股價、技術指標數字必須完全來自下方【真實技術數據】區塊，禁止自行推算或替換任何數字。\n"
+        "3. 操作建議直接說：在哪個價位加碼、在哪個價位停損、在哪個價位減碼。\n"
+        "4. 財報、基本面等非價格資訊可從【網路搜尋結果】取用。\n"
+        "5. 不要列出網站或來源連結，來源自動附在後面。\n"
+        "6. 若缺乏某項數據，明確說缺什麼，不要用空話填充。\n"
     )
+
+    if cd:
+        system_prompt += "\n\n" + build_data_block(cd)
 
     if search_results:
         search_text = "\n".join(
@@ -293,9 +343,11 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
     else:
         system_prompt += "\n\n（本次未取得網路搜尋結果，請如實告知用戶。）"
 
-    # 沒有歷史記錄時，把分析背景塞進 system prompt
-    if not history and ctx_text:
-        system_prompt += f"\n\n【頻道最近分析的股票】\n{ctx_text}"
+    # 沒有 channel_data 但有 context 文字時，退而用文字摘要
+    if not cd and not history:
+        ctx_text = channel_context.get(message.channel.id, "")
+        if ctx_text:
+            system_prompt += f"\n\n【頻道最近分析摘要】\n{ctx_text}"
 
     messages = [{"role": "system", "content": system_prompt}]
     if history:
