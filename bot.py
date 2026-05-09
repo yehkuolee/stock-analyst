@@ -319,7 +319,7 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
                 if r.get("url")
             )
             answer += f"\n\n📎 **資料來源**\n{sources}"
-        await thinking_msg.edit(content=answer)
+        await thinking_msg.edit(content=answer, suppress=True)
     except asyncio.TimeoutError:
         await thinking_msg.edit(content="❌ 回應逾時，請再試一次")
     except Exception as e:
