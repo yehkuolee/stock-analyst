@@ -285,6 +285,29 @@ def web_search(query: str, limit: int = 5) -> list[dict]:
         return []
 
 
+def scrape_url(url: str, max_chars: int = 1000) -> str:
+    """用 Firecrawl scrape 抓網頁全文，回傳截斷後的 markdown。"""
+    import requests
+    api_key = os.environ.get("FIRECRAWL_API_KEY", "")
+    if not api_key:
+        return ""
+    try:
+        resp = requests.post(
+            "https://api.firecrawl.dev/v1/scrape",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"url": url, "formats": ["markdown"]},
+            timeout=20,
+        )
+        content = resp.json().get("data", {}).get("markdown", "")
+        return content[:max_chars] if content else ""
+    except Exception as e:
+        print(f"  Scrape 失敗 {url}：{e}")
+        return ""
+
+
 # ── 對話問答（@mention 或回覆串） ────────────────────────
 
 def build_data_block(cd: dict) -> str:
@@ -318,6 +341,16 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
     search_query = f"{cd['code']} {cd['name']} {question}" if cd else question
     search_results = await loop.run_in_executor(executor, lambda: web_search(search_query))
 
+    # 並行抓前 2 篇全文
+    await thinking_msg.edit(content="📖 閱讀文章中...")
+    top_urls = [r["url"] for r in search_results[:2] if r.get("url")]
+    scraped = await asyncio.gather(
+        *[loop.run_in_executor(executor, scrape_url, url) for url in top_urls]
+    )
+    for i, content in enumerate(scraped):
+        if content:
+            search_results[i]["full_content"] = content
+
     await thinking_msg.edit(content="🤔 分析中...")
 
     if cd:
@@ -346,11 +379,12 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
         )
 
     if search_results:
-        search_text = "\n".join(
-            f"{i+1}. {r['title']}\n   {r['snippet']}\n   來源：{r['url']}"
-            for i, r in enumerate(search_results)
-        )
-        system_prompt += f"\n\n【網路搜尋結果】\n{search_text}"
+        lines = []
+        for i, r in enumerate(search_results):
+            lines.append(f"{i+1}. {r['title']}\n   摘要：{r['snippet']}\n   來源：{r['url']}")
+            if r.get("full_content"):
+                lines.append(f"   全文節錄：\n{r['full_content']}")
+        system_prompt += f"\n\n【網路搜尋結果】\n" + "\n".join(lines)
     else:
         system_prompt += "\n\n（本次未取得網路搜尋結果，請如實告知用戶。）"
 
