@@ -306,7 +306,7 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
             model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.7,
-            max_tokens=800,
+            max_tokens=500,
         )
         return resp.choices[0].message.content.strip()
 
