@@ -315,7 +315,8 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
     thinking_msg = await message.reply("🔍 搜尋資料中...")
 
     loop = asyncio.get_event_loop()
-    search_results = await loop.run_in_executor(executor, lambda: web_search(question))
+    search_query = f"{cd['code']} {cd['name']} {question}" if cd else question
+    search_results = await loop.run_in_executor(executor, lambda: web_search(search_query))
 
     await thinking_msg.edit(content="🤔 分析中...")
 
