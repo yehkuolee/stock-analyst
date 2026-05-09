@@ -312,6 +312,13 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
             loop.run_in_executor(executor, call_groq),
             timeout=60,
         )
+        if search_results:
+            sources = "\n".join(
+                f"{i+1}. [{r['title'] or r['url']}](<{r['url']}>)"
+                for i, r in enumerate(search_results)
+                if r.get("url")
+            )
+            answer += f"\n\n📎 **資料來源**\n{sources}"
         await thinking_msg.edit(content=answer)
     except asyncio.TimeoutError:
         await thinking_msg.edit(content="❌ 回應逾時，請再試一次")
