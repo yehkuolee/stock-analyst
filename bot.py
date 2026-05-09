@@ -231,26 +231,70 @@ async def build_reply_history(message: discord.Message, max_depth: int = 8) -> l
     return history
 
 
+# ── Firecrawl 網路搜尋 ───────────────────────────────────
+
+def web_search(query: str, limit: int = 5) -> list[dict]:
+    """用 Firecrawl 搜尋，回傳 [{title, url, snippet}]。"""
+    import requests
+    api_key = os.environ.get("FIRECRAWL_API_KEY", "")
+    if not api_key:
+        return []
+    try:
+        resp = requests.post(
+            "https://api.firecrawl.dev/v1/search",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "limit": limit},
+            timeout=15,
+        )
+        return [
+            {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+            for r in resp.json().get("data", [])
+        ]
+    except Exception as e:
+        print(f"  網路搜尋失敗：{e}")
+        return []
+
+
 # ── 對話問答（@mention 或回覆串） ────────────────────────
 
 async def do_chat(message: discord.Message, question: str, history: list[dict] = None):
     ctx_text = channel_context.get(message.channel.id, "")
 
+    thinking_msg = await message.reply("🔍 搜尋資料中...")
+
+    # 先上網搜尋，再組 Groq prompt
+    loop = asyncio.get_event_loop()
+    search_results = await loop.run_in_executor(executor, lambda: web_search(question))
+
+    await thinking_msg.edit(content="🤔 分析中...")
+
     system_prompt = (
         "你是台股分西施，專業的台股投資分析助理。"
         "用繁體中文回答，語氣自然、簡潔，像朋友聊天。"
-        "若問題與股票投資無關，也可正常回答。"
+        "回答時必須優先基於下方的【網路搜尋結果】，不可捏造數據或假設數字。"
+        "若搜尋結果不足以回答，請直接說「目前沒有找到相關資料」。"
     )
+
+    if search_results:
+        search_text = "\n".join(
+            f"{i+1}. {r['title']}\n   {r['snippet']}\n   來源：{r['url']}"
+            for i, r in enumerate(search_results)
+        )
+        system_prompt += f"\n\n【網路搜尋結果】\n{search_text}"
+    else:
+        system_prompt += "\n\n（本次未取得網路搜尋結果，請如實告知用戶。）"
+
     # 沒有歷史記錄時，把分析背景塞進 system prompt
     if not history and ctx_text:
-        system_prompt += f"\n\n參考背景（頻道最近分析的股票）：\n{ctx_text}"
+        system_prompt += f"\n\n【頻道最近分析的股票】\n{ctx_text}"
 
     messages = [{"role": "system", "content": system_prompt}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": question})
-
-    thinking_msg = await message.reply("🤔 思考中...")
 
     def call_groq():
         from groq import Groq
@@ -263,7 +307,6 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
         )
         return resp.choices[0].message.content.strip()
 
-    loop = asyncio.get_event_loop()
     try:
         answer = await asyncio.wait_for(
             loop.run_in_executor(executor, call_groq),
