@@ -321,7 +321,13 @@ async def do_chat(message: discord.Message, question: str, history: list[dict] =
                 for i, r in enumerate(search_results)
                 if r.get("url")
             )
-            answer += f"\n\n📎 **資料來源**\n{sources}"
+            sources_block = f"\n\n📎 **資料來源**\n{sources}"
+            max_len = 2000 - len(sources_block)
+            if len(answer) > max_len:
+                answer = answer[:max_len - 3] + "..."
+            answer += sources_block
+        elif len(answer) > 2000:
+            answer = answer[:1997] + "..."
         await thinking_msg.edit(content=answer, suppress=True)
     except asyncio.TimeoutError:
         await thinking_msg.edit(content="❌ 回應逾時，請再試一次")
