@@ -2,7 +2,8 @@
 """
 股票分析 Discord Bot
 觸發：直接輸入股票代號（4-6 位數字）
-      @台股分西施 任何問題  → 一般問答（帶上次分析背景）
+      @台股分西施 任何問題       → 新對話（帶上次分析背景）
+      回覆 Bot 的訊息            → 帶歷史記錄繼續對話
 """
 
 import asyncio
@@ -40,7 +41,7 @@ executor = ThreadPoolExecutor(max_workers=2)
 STANCE_COLOR = {"多方": 0x26a69a, "空方": 0xef5350, "觀望": 0xffd700}
 STANCE_ICON  = {"多方": "🟢", "空方": "🔴", "觀望": "🟡"}
 
-# 每個頻道最後一次股票分析的文字摘要，供追問時作為背景
+# 每個頻道最後一次股票分析的文字摘要，供新對話時作為背景
 channel_context: dict[int, str] = {}
 
 STOCK_CODE_RE = re.compile(r"^\d{4,6}$")
@@ -91,7 +92,6 @@ def build_embed(data: dict) -> discord.Embed:
         color=color,
     )
 
-    # 收盤 + 均線
     embed.add_field(
         name="📈 收盤資訊",
         value=(
@@ -103,7 +103,6 @@ def build_embed(data: dict) -> discord.Embed:
         inline=False,
     )
 
-    # 技術指標
     embed.add_field(
         name="🔢 技術指標",
         value=(
@@ -114,7 +113,6 @@ def build_embed(data: dict) -> discord.Embed:
         inline=False,
     )
 
-    # 支撐壓力
     kl = analysis.get("key_levels", {})
     support_str = " / ".join(str(s) for s in kl.get("support", [])) or "—"
     resist_str  = " / ".join(str(r) for r in kl.get("resistance", [])) or "—"
@@ -124,21 +122,19 @@ def build_embed(data: dict) -> discord.Embed:
         inline=False,
     )
 
-    # 短線預測
     embed.add_field(
         name="🔮 短線預測（3-5 日）",
         value=analysis.get("short_term", "—"),
         inline=False,
     )
 
-    # 操作建議（結構化進場/停損/目標）
     entry      = analysis.get("entry")
     stop_loss  = analysis.get("stop_loss")
     target     = analysis.get("target")
     if entry and stop_loss and target:
         try:
             e, s, t = float(entry), float(stop_loss), float(target)
-            if s < e < t:  # 合法做多：停損 < 進場 < 目標
+            if s < e < t:
                 ratio = round((t - e) / (e - s), 1)
                 suggestion_val = (
                     f"進場 **${entry}** ｜ 停損 **${stop_loss}** ｜ 目標 **${target}**　"
@@ -150,44 +146,28 @@ def build_embed(data: dict) -> discord.Embed:
             suggestion_val = "—"
     else:
         suggestion_val = "—"
-    embed.add_field(
-        name="📌 操作建議",
-        value=suggestion_val,
-        inline=False,
-    )
+    embed.add_field(name="📌 操作建議", value=suggestion_val, inline=False)
 
-    # 風險提醒
-    embed.add_field(
-        name="⚠️ 風險提醒",
-        value=analysis.get("risk", "—"),
-        inline=False,
-    )
+    embed.add_field(name="⚠️ 風險提醒", value=analysis.get("risk", "—"), inline=False)
 
-    # 技術警示
     if alerts:
         priority_icon = {1: "🔴", 2: "🟡", 3: "🔵"}
-        alert_lines = [f"{priority_icon.get(a['priority'], '▪')} **{a['type']}**：{a['msg']}" for a in alerts[:5]]
-        embed.add_field(
-            name="🚨 技術警示",
-            value="\n".join(alert_lines),
-            inline=False,
-        )
+        alert_lines = [
+            f"{priority_icon.get(a['priority'], '▪')} **{a['type']}**：{a['msg']}"
+            for a in alerts[:5]
+        ]
+        embed.add_field(name="🚨 技術警示", value="\n".join(alert_lines), inline=False)
 
-    # 近期新聞
     if news:
         news_lines = [f"• [{n['title']}]({n['url']})" for n in news[:3] if n.get("title")]
         if news_lines:
-            embed.add_field(
-                name="📰 近期新聞",
-                value="\n".join(news_lines),
-                inline=False,
-            )
+            embed.add_field(name="📰 近期新聞", value="\n".join(news_lines), inline=False)
 
     embed.set_footer(text=f"資料截至 {last['date']}　法人資料 60 日　by stock-analyst bot")
     return embed
 
 
-# ── 分析核心（共用） ──────────────────────────────────────
+# ── 分析核心 ──────────────────────────────────────────────
 
 async def do_analyze(message, stock_code: str):
     stock_code = stock_code.strip().upper()
@@ -202,7 +182,7 @@ async def do_analyze(message, stock_code: str):
         embed = build_embed(data)
         await waiting.edit(content="", embed=embed)
 
-        # 儲存分析摘要供後續 @mention 追問使用
+        # 儲存分析摘要供後續追問使用
         analysis = data["analysis"]
         last = data["last"]
         channel_context[message.channel.id] = (
@@ -225,9 +205,35 @@ async def do_analyze(message, stock_code: str):
         await waiting.edit(content=f"❌ 分析失敗：{e}")
 
 
-# ── 一般問答（@mention 觸發） ─────────────────────────────
+# ── 建立回覆串的對話歷史 ─────────────────────────────────
 
-async def do_general_qa(message: discord.Message, question: str):
+async def build_reply_history(message: discord.Message, max_depth: int = 8) -> list[dict]:
+    """往上追蹤回覆鏈，組成 Groq messages 格式的對話歷史。"""
+    history = []
+    current = message
+
+    for _ in range(max_depth):
+        if not current.reference:
+            break
+        try:
+            ref = current.reference.resolved
+            if ref is None:
+                ref = await current.channel.fetch_message(current.reference.message_id)
+        except Exception:
+            break
+
+        role = "assistant" if ref.author.bot else "user"
+        text = re.sub(r"<@!?\d+>", "", ref.content).strip()
+        if text:
+            history.insert(0, {"role": role, "content": text})
+        current = ref
+
+    return history
+
+
+# ── 對話問答（@mention 或回覆串） ────────────────────────
+
+async def do_chat(message: discord.Message, question: str, history: list[dict] = None):
     ctx_text = channel_context.get(message.channel.id, "")
 
     system_prompt = (
@@ -235,10 +241,14 @@ async def do_general_qa(message: discord.Message, question: str):
         "用繁體中文回答，語氣自然、簡潔，像朋友聊天。"
         "若問題與股票投資無關，也可正常回答。"
     )
-    user_content = (
-        f"參考背景（頻道最近分析的股票）：\n{ctx_text}\n\n用戶問題：{question}"
-        if ctx_text else question
-    )
+    # 沒有歷史記錄時，把分析背景塞進 system prompt
+    if not history and ctx_text:
+        system_prompt += f"\n\n參考背景（頻道最近分析的股票）：\n{ctx_text}"
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": question})
 
     thinking_msg = await message.reply("🤔 思考中...")
 
@@ -247,10 +257,7 @@ async def do_general_qa(message: discord.Message, question: str):
         client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
         resp = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=800,
         )
@@ -277,11 +284,26 @@ async def on_message(message):
         return
     content = message.content.strip()
 
-    # @mention → 一般問答（帶分析背景）
+    # 回覆 Bot 的訊息 → 帶歷史記錄繼續對話
+    if message.reference:
+        try:
+            ref = message.reference.resolved or await message.channel.fetch_message(
+                message.reference.message_id
+            )
+            if ref.author == bot.user:
+                history = await build_reply_history(message)
+                question = re.sub(r"<@!?\d+>", "", content).strip()
+                if question:
+                    await do_chat(message, question, history)
+                return
+        except Exception:
+            pass
+
+    # @mention → 新對話（帶分析背景）
     if bot.user in message.mentions and not message.mention_everyone:
         question = re.sub(r"<@!?\d+>", "", content).strip()
         if question:
-            await do_general_qa(message, question)
+            await do_chat(message, question)
         else:
             await message.reply("有什麼問題都可以問我！股票代號直接輸入，其他問題 @我就好 😊")
         return
@@ -306,14 +328,22 @@ async def analyze(ctx, stock_code: str = None):
 
 @bot.command(name="help_analyze", aliases=["ah"])
 async def help_analyze(ctx):
-    embed = discord.Embed(
-        title="📖 股票分析 Bot 使用說明",
-        color=0x90caf9,
-    )
+    embed = discord.Embed(title="📖 股票分析 Bot 使用說明", color=0x90caf9)
     embed.add_field(name="股票分析", value="直接輸入股票代號，例如：`2330`", inline=False)
-    embed.add_field(name="追問 / 一般問答", value="`@台股分西施 被套了怎辦？`\n分析後可追問，或問任何投資問題", inline=False)
+    embed.add_field(
+        name="問問題 / 追問",
+        value=(
+            "`@台股分西施 被套了怎辦？` → 新對話\n"
+            "直接**回覆** Bot 的訊息 → 繼續上下文對話"
+        ),
+        inline=False,
+    )
     embed.add_field(name="舊指令（仍可用）", value="`!analyze 2330`　或　`!a 2330`", inline=False)
-    embed.add_field(name="分析內容", value="K 線 60 日、三大法人 60 日、Firecrawl 新聞、Groq AI 綜合研判", inline=False)
+    embed.add_field(
+        name="分析內容",
+        value="K 線 60 日、三大法人 60 日、Firecrawl 新聞、Groq AI 綜合研判",
+        inline=False,
+    )
     await ctx.reply(embed=embed)
 
 
@@ -322,7 +352,7 @@ async def help_analyze(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Bot 上線：{bot.user}（{bot.user.id}）")
-    print("   股票代號直接輸入，@mention 觸發一般問答")
+    print("   股票代號直接輸入；@mention 或回覆 Bot 觸發對話")
 
 
 def main():
