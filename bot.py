@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 股票分析 Discord Bot
-觸發：!analyze 2330
+觸發：直接輸入股票代號（4-6 位數字）
+      @台股分西施 任何問題  → 一般問答（帶上次分析背景）
 """
 
 import asyncio
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -37,6 +39,11 @@ executor = ThreadPoolExecutor(max_workers=2)
 
 STANCE_COLOR = {"多方": 0x26a69a, "空方": 0xef5350, "觀望": 0xffd700}
 STANCE_ICON  = {"多方": "🟢", "空方": "🔴", "觀望": "🟡"}
+
+# 每個頻道最後一次股票分析的文字摘要，供追問時作為背景
+channel_context: dict[int, str] = {}
+
+STOCK_CODE_RE = re.compile(r"^\d{4,6}$")
 
 
 # ── 分析主流程（在 thread 執行，避免阻塞 event loop） ────────
@@ -194,6 +201,22 @@ async def do_analyze(message, stock_code: str):
         )
         embed = build_embed(data)
         await waiting.edit(content="", embed=embed)
+
+        # 儲存分析摘要供後續 @mention 追問使用
+        analysis = data["analysis"]
+        last = data["last"]
+        channel_context[message.channel.id] = (
+            f"股票：{data['stock_code']} {data['stock_name']}\n"
+            f"收盤：{last['收盤價']}　MA5：{last['MA5']}　MA20：{last['MA20']}\n"
+            f"RSI：{last['RSI']}　KD：{last['K']}/{last['D']}\n"
+            f"研判立場：{analysis.get('stance', '—')}\n"
+            f"摘要：{analysis.get('summary', '—')}\n"
+            f"短線預測：{analysis.get('short_term', '—')}\n"
+            f"操作建議 — 進場：{analysis.get('entry', '—')}　"
+            f"停損：{analysis.get('stop_loss', '—')}　目標：{analysis.get('target', '—')}\n"
+            f"風險提醒：{analysis.get('risk', '—')}"
+        )
+
     except asyncio.TimeoutError:
         await waiting.edit(content="❌ 分析逾時（超過 5 分鐘），請稍後再試")
     except ValueError as e:
@@ -202,19 +225,72 @@ async def do_analyze(message, stock_code: str):
         await waiting.edit(content=f"❌ 分析失敗：{e}")
 
 
-# ── 監聽所有訊息：直接打股票代號即可 ──────────────────────
+# ── 一般問答（@mention 觸發） ─────────────────────────────
 
-import re
-STOCK_CODE_RE = re.compile(r"^\d{4,6}$")
+async def do_general_qa(message: discord.Message, question: str):
+    ctx_text = channel_context.get(message.channel.id, "")
+
+    system_prompt = (
+        "你是台股分西施，專業的台股投資分析助理。"
+        "用繁體中文回答，語氣自然、簡潔，像朋友聊天。"
+        "若問題與股票投資無關，也可正常回答。"
+    )
+    user_content = (
+        f"參考背景（頻道最近分析的股票）：\n{ctx_text}\n\n用戶問題：{question}"
+        if ctx_text else question
+    )
+
+    thinking_msg = await message.reply("🤔 思考中...")
+
+    def call_groq():
+        from groq import Groq
+        client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.7,
+            max_tokens=800,
+        )
+        return resp.choices[0].message.content.strip()
+
+    loop = asyncio.get_event_loop()
+    try:
+        answer = await asyncio.wait_for(
+            loop.run_in_executor(executor, call_groq),
+            timeout=60,
+        )
+        await thinking_msg.edit(content=answer)
+    except asyncio.TimeoutError:
+        await thinking_msg.edit(content="❌ 回應逾時，請再試一次")
+    except Exception as e:
+        await thinking_msg.edit(content=f"❌ 發生錯誤：{e}")
+
+
+# ── 監聽所有訊息 ──────────────────────────────────────────
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
     content = message.content.strip()
+
+    # @mention → 一般問答（帶分析背景）
+    if bot.user in message.mentions and not message.mention_everyone:
+        question = re.sub(r"<@!?\d+>", "", content).strip()
+        if question:
+            await do_general_qa(message, question)
+        else:
+            await message.reply("有什麼問題都可以問我！股票代號直接輸入，其他問題 @我就好 😊")
+        return
+
+    # 純數字 → 股票分析
     if STOCK_CODE_RE.match(content):
         await do_analyze(message, content)
         return
+
     await bot.process_commands(message)
 
 
@@ -234,9 +310,10 @@ async def help_analyze(ctx):
         title="📖 股票分析 Bot 使用說明",
         color=0x90caf9,
     )
-    embed.add_field(name="分析指令", value="`!analyze {代號}`\n例：`!analyze 2330`", inline=False)
-    embed.add_field(name="縮寫", value="`!a 2330`　或　`!分析 2330`", inline=False)
-    embed.add_field(name="分析內容", value="K 線 60 日、三大法人 60 日、Firecrawl 新聞、Claude AI 綜合研判", inline=False)
+    embed.add_field(name="股票分析", value="直接輸入股票代號，例如：`2330`", inline=False)
+    embed.add_field(name="追問 / 一般問答", value="`@台股分西施 被套了怎辦？`\n分析後可追問，或問任何投資問題", inline=False)
+    embed.add_field(name="舊指令（仍可用）", value="`!analyze 2330`　或　`!a 2330`", inline=False)
+    embed.add_field(name="分析內容", value="K 線 60 日、三大法人 60 日、Firecrawl 新聞、Groq AI 綜合研判", inline=False)
     await ctx.reply(embed=embed)
 
 
@@ -245,7 +322,7 @@ async def help_analyze(ctx):
 @bot.event
 async def on_ready():
     print(f"✅ Bot 上線：{bot.user}（{bot.user.id}）")
-    print("   指令：!analyze {股票代號}")
+    print("   股票代號直接輸入，@mention 觸發一般問答")
 
 
 def main():
